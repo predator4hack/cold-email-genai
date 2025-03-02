@@ -3,7 +3,6 @@ import streamlit as st
 from langchain.chains import LLMChain
 from langchain.prompts import PromptTemplate
 from langchain_community.document_loaders import PyPDFLoader, Docx2txtLoader
-from langchain_openai import OpenAI
 from langchain_groq import ChatGroq
 from langchain_core.output_parsers import JsonOutputParser
 import yaml
