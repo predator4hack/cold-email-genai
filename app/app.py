@@ -20,7 +20,7 @@ os.makedirs(RESUME_DIR, exist_ok=True)
 
 # Initialize Langchain OpenAI
 llm = ChatGroq(temperature=0, groq_api_key=os.getenv("GROQ_API_KEY"), model_name="llama-3.3-70b-versatile")
-llm_msg = ChatGroq(temperature=0.5, groq_api_key=os.getenv("GROQ_API_KEY"), model_name="deepseek-r1-distill-llama-70b", reasoning_format="hidden")
+llm_msg = ChatGroq(temperature=0.4, groq_api_key=os.getenv("GROQ_API_KEY"), model_name="deepseek-r1-distill-llama-70b", reasoning_format="hidden")
 
 # User Authentication Functions
 def load_users():
@@ -73,33 +73,58 @@ def get_job_description(input_text):
         try:
             response = requests.get(input_text)
             soup = BeautifulSoup(response.text, 'html.parser')
-            return ' '.join(soup.get_text().split()[:1000])
-        except:
-            return "Could not scrape URL, please paste description directly"
+            scraped_text = ' '.join(soup.get_text().split()[:1000])
+            
+            # Check for anti-scraping message
+            if "Please enable JS and disable any ad blocker" in scraped_text:
+                return "ANTI-SCRAPE DETECTED: Please paste job description directly"
+            
+            return scraped_text
+        except Exception as e:
+            return f"ERROR: {str(e)} - Please paste description directly"
     return input_text
+
+
+def parse_jd(input_text):
+    if not input_text:
+        return
+    prompt_extract = PromptTemplate.from_template(
+        """
+        ### SCRAPED TEXT FROM JOB POSTING DELIMETERED BY BACKTICKS:
+        ```{input_text}```
+        ### INSTRUCTION:
+        The scraped text is from a job posting.
+        Your job is to structure the data in JSON format containing the 
+        following keys: `about_company`, `job_requirements`.
+        Only return the valid JSON.
+        ### VALID JSON (NO PREAMBLE):    
+        """
+    )
+    chain_extract = prompt_extract | llm 
+    res = chain_extract.invoke(input={'input_text': input_text})
+    json_parser = JsonOutputParser()
+    return json_parser.parse(res.content)
 
 # Message Generation Templates
 founder_template = """
 Given the resume contents of the user, create a personalized message to the startup founder (within 100 words) that:
-1. Come up with story on how resonate with problem that the company is trying to solve (Optional-mention only when applicable)
+1. Come up with story on how user resonate with problem that the company is working on (Optional-mention only when applicable)
 2. Connects my experience in experience/projects/achievements with the company's work
 3. Highlights my relevant skills aligning with company's needs mnd job description
 4. Ends with a call to schedule a chat
 
-Experience, Projects, achievements, Job Description are mentioned below delimeted by triple backticks:
+Experience, Projects, achievements, Job Description, About Company are mentioned below delimeted by triple backticks:
 Experience: ```{experience}```
 Projects: ```{projects}```
 Achievements: ```{achievements}```
 Job Description: ```{job_desc}```
+About Company: ```{about_company}```
 
 Keep the message as human-like as you can showcasing genuine enthusiasm to contribute to the company.
-You can answer in the following style:
+You can answer in the following style delimetered by triple backticks(JUST FOR INSPIRATION, DO NOT COPY AS IT IS):
+```
 <Job Description>
-Terra is an API that makes it easy for apps to connect to wearables. Currently, apps and developers in the fitness, wellness, sleep, and other health spaces are using us. Terra was launched in early 2021, and since then we’ve been growing like crazy. But this is just the beginning.
-
-The goal and vision
-
-Think if Spotify and Netflix create music and movies based on your heart rate, and stress levels, in real time. We want to enable apps to achieve that reality, through our super easy to use API.
+Terra is an API that makes it easy for apps to connect to wearables.
 </Job Description>
 <Sample Answer>
 I came across Terra and was immediately drawn to the vision of personalizing experiences—like listening to the right songs based on heart rate. I can’t tell you how many times I’ve been at the gym, ready to push my limits, only for a slow, offbeat song to kill the momentum. It’s frustrating, and I completely resonate with the need for smarter, real-time personalization.
@@ -108,6 +133,7 @@ As an ML/DL enthusiast, I love building AI-driven products that enhance user exp
 
 Looking forward to exploring this further!
 </Sample Answer>
+```
 """
 
 hr_template = """Given the resume contents of the user, write a professional cover letter (keep under 150 words) that:
@@ -160,32 +186,38 @@ def main_app():
     if st.session_state.user['resume'] and job_desc:
         # Parse resume
         resume_data = parse_resume(st.session_state.user['resume'])
-        
-        # Generate Content
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("Generate Founder Message"):
-                message = LLMChain(llm=llm_msg, prompt=PromptTemplate.from_template(founder_template)).run({
-                    'skills': resume_data['skills'],
-                    'experience': resume_data['experience'],
-                    'job_desc': job_desc,
-                    'projects': resume_data['projects'],
-                    'achievements': resume_data['achievements']
-                })
-                st.write(message)
-                st.download_button("Download Message", message, file_name="founder_message.txt")
-        
-        with col2:
-            if st.button("Generate HR Cover Letter"):
-                letter = LLMChain(llm=llm_msg, prompt=PromptTemplate.from_template(hr_template)).run({
-                    'skills': resume_data['skills'],
-                    'experience': resume_data['experience'],
-                    'projects': resume_data['projects'],
-                    'achievements': resume_data['achievements'],
-                    'job_desc': job_desc
-                })
-                st.write(letter)
-                st.download_button("Download Letter", letter, file_name="cover_letter.txt")
+        jd = parse_jd(job_desc)
+        if job_desc.startswith("ANTI-SCRAPE DETECTED") or job_desc.startswith("ERROR"):
+            st.error(job_desc)
+            st.warning("Please paste the job description directly below instead of using URL")
+        else:
+            # Generate Content
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("Generate Founder Message"):
+                    message = LLMChain(llm=llm_msg, prompt=PromptTemplate.from_template(founder_template)).run({
+                        'skills': resume_data['skills'],
+                        'experience': resume_data['experience'],
+                        'job_desc': jd['job_requirements'],
+                        'about_company': jd['about_company'],
+                        'projects': resume_data['projects'],
+                        'achievements': resume_data['achievements']
+                    })
+                    st.write(message)
+                    st.download_button("Download Message", message, file_name="founder_message.txt")
+            
+            with col2:
+                if st.button("Generate HR Cover Letter"):
+                    letter = LLMChain(llm=llm_msg, prompt=PromptTemplate.from_template(hr_template)).run({
+                        'skills': resume_data['skills'],
+                        'experience': resume_data['experience'],
+                        'projects': resume_data['projects'],
+                        'achievements': resume_data['achievements'],
+                        'job_desc': jd['job_requirements'],
+                        'about_company': jd['about_company']
+                    })
+                    st.write(letter)
+                    st.download_button("Download Letter", letter, file_name="cover_letter.txt")
 
 # Login/Register
 def auth_page():
